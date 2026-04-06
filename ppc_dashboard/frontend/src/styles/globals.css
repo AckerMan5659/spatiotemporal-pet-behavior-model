@@ -1,0 +1,148 @@
+@import "tailwindcss";
+
+@theme {
+  /* Blue & White Color Palette - Clean & Professional */
+  /* 主色调 - 经典蓝 */
+  --color-primary: #1E88E5;
+  --color-primary-light: #42A5F5;
+  --color-primary-dark: #1565C0;
+  --color-primary-50: #E3F2FD;
+  --color-primary-100: #BBDEFB;
+  --color-primary-200: #90CAF9;
+  --color-primary-300: #64B5F6;
+  --color-primary-400: #42A5F5;
+  --color-primary-500: #1E88E5;
+  --color-primary-600: #1976D2;
+  --color-primary-700: #1565C0;
+  --color-primary-800: #0D47A1;
+  --color-primary-900: #0A3A82;
+
+  /* 次要色 - 深蓝 */
+  --color-secondary: #1565C0;
+  --color-secondary-light: #1976D2;
+  --color-secondary-dark: #0D47A1;
+  
+  /* 中性色 - 蓝灰 */
+  --color-neutral: #90A4AE;
+  --color-neutral-light: #CFD8DC;
+  --color-neutral-dark: #546E7A;
+  
+  /* 强调色 - 亮蓝 */
+  --color-accent: #03A9F4;
+  --color-accent-light: #4FC3F7;
+  --color-accent-dark: #0288D1;
+  
+  /* 温暖色 - 琥珀蓝 */
+  --color-warm: #29B6F6;
+  --color-warm-light: #4FC3F7;
+  --color-warm-dark: #0288D1;
+
+  /* 功能色 - 蓝白主题 */
+  --color-success: #0288D1;
+  --color-warning: #4FC3F7;
+  --color-error: #1976D2;
+  --color-info: #1E88E5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Decorative Background Pattern */
+.bg-pattern {
+  background-image: 
+    radial-gradient(circle at 20% 50%, rgba(30, 136, 229, 0.04) 0%, transparent 50%),
+    radial-gradient(circle at 80% 80%, rgba(66, 165, 245, 0.03) 0%, transparent 50%),
+    radial-gradient(circle at 40% 20%, rgba(3, 169, 244, 0.02) 0%, transparent 50%);
+}
+
+.dark .bg-pattern {
+  background-image: 
+    radial-gradient(circle at 20% 50%, rgba(66, 165, 245, 0.08) 0%, transparent 50%),
+    radial-gradient(circle at 80% 80%, rgba(30, 136, 229, 0.06) 0%, transparent 50%),
+    radial-gradient(circle at 40% 20%, rgba(3, 169, 244, 0.04) 0%, transparent 50%);
+}
+
+/* Gentle Gradient Backgrounds */
+.gradient-primary {
+  background: linear-gradient(135deg, #1E88E5 0%, #42A5F5 100%);
+}
+
+.gradient-secondary {
+  background: linear-gradient(135deg, #1565C0 0%, #1976D2 100%);
+}
+
+.gradient-warm {
+  background: linear-gradient(135deg, #0288D1 0%, #4FC3F7 100%);
+}
+
+/* Glass Morphism Effect */
+.glass {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(30, 136, 229, 0.2);
+}
+
+.dark .glass {
+  background: rgba(13, 71, 161, 0.15);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(66, 165, 245, 0.2);
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(135deg, #1E88E5, #42A5F5);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(135deg, #1565C0, #1E88E5);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: linear-gradient(135deg, #42A5F5, #1E88E5);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(135deg, #4FC3F7, #42A5F5);
+}
+
+/* Card Hover Effects */
+.card-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px -8px rgba(30, 136, 229, 0.3);
+}
+
+/* Smooth transitions */
+.transition-smooth {
+  transition: all 0.3s ease-in-out;
+}

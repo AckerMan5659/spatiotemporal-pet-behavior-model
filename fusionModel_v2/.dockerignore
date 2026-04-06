@@ -1,0 +1,11 @@
+*.pyc
+__pycache__/
+*.mp4
+*.avi
+*.mov
+.git/
+.gitignore
+*.md
+!API_README.md
+.DS_Store
+*.log

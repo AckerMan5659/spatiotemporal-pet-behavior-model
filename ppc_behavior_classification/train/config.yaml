@@ -1,0 +1,157 @@
+# =================================================================
+# 1. 全局設置
+# =================================================================
+# 切換模式: "normal" 或 "abnormal"
+mode: "abnormal"
+
+# 推理管道配置
+pipeline:
+  output_dir: outputs
+  min_box_size: 32
+  frame_skip: 4       # ✅ 每隔3帧推理一次，1=每帧，2=跳1帧，3=跳2帧...
+
+# =================================================================
+# 2. 預訓練配置 (Phase 1: Pre-training)
+# =================================================================
+pretrain:
+  dataset_path: "E:/Documents/kinetics_animals"
+  num_classes: 58              # 這是針對 85 類 Kinetics 預訓練用的
+  epochs: 50
+  batch_size: 16
+  lr: 1e-4
+  workers: 4
+  imgsz: 224
+  output_dir: "outputs/pretrained"
+
+# =================================================================
+# 3. 任務特定配置 (保留所有原始參數，僅增加微調控制)
+# =================================================================
+task_configs:
+
+  # --- NORMAL 模式 ---
+  normal:
+    dataset_path: "/userhome/cs/u3650650/cropped_dataset/normal_3"
+    class_names:  ["eat", "drink", "other"]   #["active", "eat", "rest", "drink", "jump"]  1. ["active", "rest", "sleep", "eat", "drink", "defecate", "jump"]  2.["walk", "run", "sit", "stand", "lie", "eat"]
+    num_classes: 3             # 保留原本的功能適配
+    output_model_name: "outputs/finetune/finetune_normal_model3.pth"
+
+    # [新增] 用於控制微調
+    finetune:
+      use_pretrained: True
+      enabled: True
+      checkpoint_path: "outputs/pretrained/best_pretrain_mamba.pth"     # 指向训练好的最佳预训练权重
+      freeze_backbone: False   # 建议 False，让主干微调适应新场景
+      freeze_head_temporal: False # 建议 False，让 Mamba 也跟着微调
+      batch_size: 16
+      output_model_name: "outputs/finetune/finetune_normal_model3.pth"
+
+    # [保留原版所有參數名]
+    recognizer:
+      num_classes: 5             # 保留原本的功能適配
+      timm_model: repvit_m1  # backbones: efficientformer_l1/ efficientvit_b2 / repvit_m1 / tf_mobilenetv3_small_minimal_100 / edgenext_small / mobilevitv2_050
+      use_tsm: False
+      feature_dim: 0         # 設置為 0 開啟自動推斷
+      temporal_window: 16
+      head: gru            # lstm | transformer | mamba | vmamba
+      mamba_d_state: 16
+      lstm_hidden: 256
+      lstm_layers: 2
+      transformer_depth: 2
+      transformer_heads: 4
+      imgsz: 224
+      dropout: 0.2
+      augment:
+        scale_min: 0.9
+        scale_max: 1.1
+        rotate: 15
+        translate: 0.1
+        fliplr: 0.5
+        brightness: 0.1
+        contrast: 0.1
+
+  # --- ABNORMAL 模式 ---
+  abnormal:
+    dataset_path: "/userhome/cs/u3650650/abnormal"
+    class_names: ["normal", "convulsion", "limp" ,"sneeze", "vomit"]
+    num_classes: 5
+    output_model_name: "best_model_abnormal/best_abnormal_model.pth"
+
+    # [新增] 用於控制微調
+    finetune:
+      use_pretrained: True
+      enabled: True
+      checkpoint_path: "outputs/pretrained/best_pretrain_mamba0.pth"     # 指向训练好的最佳预训练权重
+      freeze_backbone: False   # 建议 False，让主干微调适应新场景
+      freeze_head_temporal: False # 建议 False，让 Mamba 也跟着微调
+      batch_size: 16
+      output_model_name: "outputs/finetune/finetune_abnormal_model1.pth"
+
+    # [保留原版所有參數名]
+    recognizer:
+      num_classes: 5             # 保留原本的功能適配
+      timm_model: repvit_m1  # backbones: efficientformer_l1/ efficientvit_b2 / repvit_m1 / tf_mobilenetv3_small_minimal_100 / edgenext_small / mobilevitv2_050
+      feature_dim: 0         # 設置為 0 開啟自動推斷
+      temporal_window: 16
+      use_tsm: False
+      head: gru            # lstm | transformer | mamba
+      mamba_d_state: 8
+      mamba_d_conv: 2
+      lstm_hidden: 256
+      lstm_layers: 2
+      imgsz: 224
+      dropout: 0.3
+      augment:
+        scale_min: 0.9
+        scale_max: 1.1
+        rotate: 15
+        translate: 0.1
+        fliplr: 0.5
+        brightness: 0.1
+        contrast: 0.1
+
+# =================================================================
+# 4. YOLO 檢測器配置
+# =================================================================
+detector:
+  type: yolo
+  model: runs/detector/train22/weights/best.pt          # yolov8n.pt | yolov11n.pt | yolov12n.pt | yolov12s.pt
+  conf: 0.35
+  iou: 0.5
+  imgsz: 416                # 640 | 416 | 224 | 320
+  device: cpu               # auto 无 CUDA 自动走 cpu；有 CUDA 走 0
+  tracker: bytetrack.yaml   # bytetrack.yaml | botsort.yaml | 没有就填 null
+  classes: [0, 1]         # 只檢測 "dog"和 "cat"
+
+detector_training:
+  data_yaml: "data.yaml"
+  base_model: "yolov11n.pt"
+  epochs: 50
+  imgsz: 640
+  batch_size: 16
+  device: 0
+  workers: 4
+  project_dir: "runs/detector"
+  name: "cat_dog_detector"
+
+# =================================================================
+# 5. 蒸餾配置 (Phase 3: Distillation)
+# =================================================================
+distillation:
+  enabled: True
+  mode_to_use: "abnormal"
+  teacher_model: "video_swin_b"
+  teacher_checkpoint: "/teacher/teacher_best_ab_5cls.pth" # 指向 Ep 28 最佳权重
+  student_backbone: "repvit_m1"
+  student_pretrained_path: ""
+  
+  # --- Loss 权重调整 ---
+  alpha: 0.0          # Feature Loss: 进一步降低 (5->3->2)，RepViT 很难模仿 Swin 的 Stage 3 特征，别强迫它
+  beta: 4.0           # KL Loss: 提高 (2->4)，让 Student 多看 Teacher 的 Logits（软标签），因为 Teacher 对吃喝的判断很准
+  gamma: 1.0          # GT Loss: 保持 1.0
+  
+  # --- 超参数 ---
+  temperature: 4.0    # 保持 4.0，适合细粒度蒸馏
+  learning_rate: 5e-5 # 大幅提高 (5e-5 -> 4e-4)，Student 需要快速收敛
+  batch_size: 16
+  accum_steps: 4
+  epochs: 40          # 保持 60

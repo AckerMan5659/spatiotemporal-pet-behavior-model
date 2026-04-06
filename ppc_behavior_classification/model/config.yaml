@@ -1,0 +1,90 @@
+# =================================================================
+# 1. 全局設置
+# =================================================================
+# 切換模式: "normal" 或 "abnormal"
+mode: "normal"
+
+# 推理管道配置
+pipeline:
+  output_dir: outputs
+  min_box_size: 12
+  frame_skip: 3       # ✅ 每隔3帧推理一次，1=每帧，2=跳1帧，3=跳2帧...
+
+# =================================================================
+# 3. 任務特定配置 (保留所有原始參數，僅增加微調控制)
+# =================================================================
+task_configs:
+
+  # --- NORMAL 模式 ---
+  normal:
+    dataset_path: "D:/Desktop/PET1/cropped_dataset/normal"
+    class_names: ["eat", "drink", "other"]    #0.["active", "eat", "rest", "drink", "jump"] 1. ["active", "rest", "sleep", "eat", "drink", "defecate", "jump"]  2.["walk", "run", "sit", "stand", "lie", "eat"]
+    num_classes: 3             # 保留原本的功能適配
+    output_model_name: "best_model_normal/0313/repvit_best_distilled_0313.onnx"
+
+    # [保留原版所有參數名]
+    recognizer:
+      num_classes: 5             # 保留原本的功能適配
+      timm_model: repvit_m1  # backbones: efficientformer_l1/ efficientvit_b2 / repvit_m1 / tf_mobilenetv3_small_minimal_100 / edgenext_small / mobilevitv2_050
+      feature_dim: 0         # 設置為 0 開啟自動推斷
+      temporal_window: 16
+      use_tsm: False
+      head: gru            # lstm | transformer | mamba | vmamba
+      mamba_d_state: 16
+      mamba_d_conv: 4
+      mamba_expand: 2
+      lstm_hidden: 256
+      lstm_layers: 2
+      imgsz: 224
+      dropout: 0.2
+      augment:
+        scale_min: 0.9
+        scale_max: 1.1
+        rotate: 15
+        translate: 0.1
+        fliplr: 0.5
+        brightness: 0.1
+        contrast: 0.1
+
+  # --- ABNORMAL 模式 ---
+  abnormal:
+    dataset_path: "D:/Desktop/PET1/model/baseline/dataset/abnormal/combined_4_200_dataset"
+    class_names: ["normal", "convulsion", "limp" ,"sneeze", "vomit"]   #["normal", "convulsion", "limp" ,"sneeze", "vomit"]["normal", "convulsion", "vomit"]
+    num_classes: 5
+    output_model_name: "best_model_abnormal/repvit_best_distilled_5cls_0316.onnx"
+
+    # [保留原版所有參數名]
+    recognizer:
+      num_classes: 5             # 保留原本的功能適配
+      timm_model: repvit_m1  # backbones: efficientformer_l1/ efficientvit_b2 / repvit_m1 / tf_mobilenetv3_small_minimal_100 / edgenext_small / mobilevitv2_050
+      feature_dim: 0         # 設置為 0 開啟自動推斷
+      temporal_window: 16
+      head: gru            # lstm | transformer | mamba
+      mamba_d_state: 16
+      mamba_d_conv: 4
+      mamba_expand: 2
+      lstm_hidden: 256
+      lstm_layers: 2
+      imgsz: 224
+      dropout: 0.3
+      augment:
+        scale_min: 0.9
+        scale_max: 1.1
+        rotate: 15
+        translate: 0.1
+        fliplr: 0.5
+        brightness: 0.1
+        contrast: 0.1
+
+# =================================================================
+# 4. YOLO 檢測器配置
+# =================================================================
+detector:
+  type: yolo
+  model:  yolo/best3_3.pt                    #runs/detector/train22/weights/best.pt          # yolov8n.pt | yolov11n.pt | yolov12n.pt | yolov12s.pt
+  conf: 0.5
+  iou: 0.5
+  imgsz: 640               # 640 | 416 | 224 | 320
+  device: cpu               # auto 无 CUDA 自动走 cpu；有 CUDA 走 0
+  tracker: bytetrack.yaml   # bytetrack.yaml | botsort.yaml | 没有就填 null
+  classes: [1, 2]         # 只檢測 "dog" 2 和 "cat" 1,"bowl" 0
