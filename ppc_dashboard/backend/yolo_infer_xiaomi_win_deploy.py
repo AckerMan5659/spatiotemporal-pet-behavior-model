@@ -20,7 +20,6 @@ import threading
 import multiprocessing as mp
 import logging
 import argparse
-import queue
 import gc
 
 # ====================================================================
@@ -117,7 +116,6 @@ class StrategyFactory:
     def get_strategy(hw_report):
         tier = hw_report["tier"]
 
-        # 基礎配置
         strategy = {
             "tier": tier,
             "use_qsv": False,
@@ -128,35 +126,35 @@ class StrategyFactory:
             "max_cams_suggested": 2,
             "static_refresh_interval": 20.0,
             "max_targets_per_cam": 3,
-            "processing_mode": "sequential" # 預設為串行，防資源擠兌
+            "processing_mode": "sequential"
         }
 
         if tier == "TIER_CUDA":
             strategy.update({
                 "use_qsv": True, "target_fps": 25.0, "imgsz": 640, "device": "cuda",
                 "model_format": "cuda_pt", "max_cams_suggested": 8,
-                "static_refresh_interval": 5.0, "max_targets_per_cam": 9, # 🌟 最多 9 隻
+                "static_refresh_interval": 5.0, "max_targets_per_cam": 9,
                 "processing_mode": "parallel"
             })
         elif tier == "TIER_JETSON":
             strategy.update({
                 "use_qsv": False, "target_fps": 20.0, "imgsz": 640, "device": "cuda",
                 "model_format": "tensorrt", "max_cams_suggested": 6,
-                "static_refresh_interval": 15.0, "max_targets_per_cam": 6, # 🌟 最多 6 隻
+                "static_refresh_interval": 15.0, "max_targets_per_cam": 6,
                 "processing_mode": "sequential"
             })
         elif tier == "TIER_HIGH":
             strategy.update({
                 "use_qsv": True, "target_fps": 15.0, "imgsz": 480, "device": "cpu",
                 "model_format": "openvino_int8", "max_cams_suggested": 4,
-                "static_refresh_interval": 10.0, "max_targets_per_cam": 6, # 🌟 最多 6 隻
+                "static_refresh_interval": 10.0, "max_targets_per_cam": 6,
                 "processing_mode": "parallel"
             })
-        else: # TIER_LOW (差 CPU)
+        else: 
             strategy.update({
                 "use_qsv": False, "target_fps": 5.0, "imgsz": 480, "device": "cpu",
                 "model_format": "openvino_fp32", "max_cams_suggested": 2,
-                "static_refresh_interval": 20.0, "max_targets_per_cam": 3, # 🌟 最多 3 隻
+                "static_refresh_interval": 20.0, "max_targets_per_cam": 3,
                 "processing_mode": "sequential"
             })
 
@@ -168,10 +166,16 @@ class StrategyFactory:
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # 異常錄影紀錄表
     c.execute('''CREATE TABLE IF NOT EXISTS video_records (
                                                               id INTEGER PRIMARY KEY AUTOINCREMENT,
                                                               cam_id INTEGER, filename TEXT, start_time DATETIME, end_time DATETIME,
                                                               trigger_action TEXT, max_confidence REAL, status TEXT)''')
+    # 🔥 新增：每秒行為寬表 (八路攝影機整合為一條，極大節省空間)
+    c.execute('''CREATE TABLE IF NOT EXISTS behavior_logs (
+                                                              timestamp DATETIME PRIMARY KEY, 
+                                                              cam0 TEXT, cam1 TEXT, cam2 TEXT, cam3 TEXT, 
+                                                              cam4 TEXT, cam5 TEXT, cam6 TEXT, cam7 TEXT)''')
     conn.commit()
     conn.close()
 
@@ -197,11 +201,13 @@ def db_cleanup_thread():
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             cutoff_date = (datetime.datetime.now() - datetime.timedelta(days=KEEP_RECORDS_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 1. 清理過期的錄影檔案
             c.execute("SELECT id, filename FROM video_records WHERE start_time < ?", (cutoff_date,))
             old_records = c.fetchall()
             for row in old_records:
                 record_id, fname = row
-                thumb_name = fname.replace('/videos/', '/thumbnails/').replace('\\videos\\', '\\thumbnails\\').replace('.webm', '.jpg').replace('.mp4', '.jpg')
+                thumb_name = fname.replace('/videos/', '/thumbnails/').replace('\\videos\\', '\\thumbnails\\').replace('.webm', '.mp4', '.jpg')
                 if os.path.exists(fname):
                     try: os.remove(fname)
                     except: pass
@@ -210,17 +216,63 @@ def db_cleanup_thread():
                     except: pass
             if old_records:
                 c.execute("DELETE FROM video_records WHERE start_time < ?", (cutoff_date,))
-                conn.commit()
+            
+            # 2. 🔥 清理過期的秒級行為日誌
+            c.execute("DELETE FROM behavior_logs WHERE timestamp < ?", (cutoff_date,))
+            
+            conn.commit()
             conn.close()
         except Exception: pass
-        time.sleep(3600)
+        time.sleep(3600) # 每小時檢查一次
+
+# 🔥 新增：每秒行為記錄執行緒 (1秒1次，提取8路鏡頭主導行為寫入一條紀錄)
+def behavior_logger_thread(shared_dict):
+    while True:
+        time.sleep(1.0)
+        try:
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            row_data = [now_str]
+            
+            for cid in range(8):
+                dom_behavior = "None"
+                try:
+                    data = shared_dict.get(cid, {})
+                    if data.get("stats", {}).get("status") == "online":
+                        active_states = data.get("active_states", {})
+                        if active_states:
+                            behavior_counts = {}
+                            # 統計該畫面中所有寵物的最高機率行為
+                            for tid, st in active_states.items():
+                                best_b = "Rest"
+                                max_p = 0
+                                for k, v in st.get("probs", {}).items():
+                                    if k in ["Eat", "Drink", "Rest", "Jump", "Act"] and v > max_p:
+                                        max_p = v; best_b = k
+                                behavior_counts[best_b] = behavior_counts.get(best_b, 0) + 1
+                            
+                            # 取數量最多的行為作為主導行為
+                            if behavior_counts:
+                                dom_behavior = max(behavior_counts, key=behavior_counts.get)
+                except: pass
+                row_data.append(dom_behavior)
+
+            # 寫入資料庫
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            c = conn.cursor()
+            c.execute('''INSERT OR IGNORE INTO behavior_logs 
+                         (timestamp, cam0, cam1, cam2, cam3, cam4, cam5, cam6, cam7) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', row_data)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            pass
 
 # ====================================================================
 # ⚙️ 系統參數解析
 # ====================================================================
 def parse_args():
     parser = argparse.ArgumentParser(description="SmartPet AI Backend (Dual-Architecture Edition)")
-    parser.add_argument("--source", type=str, default="local", choices=["rtsp", "local"])
+    parser.add_argument("--source", type=str, default="rtsp", choices=["rtsp", "local"])
     parser.add_argument("--hwaccel", type=str, default="auto", choices=["auto", "qsv", "none"])
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--rtsp_url_1", type=str, default="rtsp://127.0.0.1:8554/c400_sd1")
@@ -228,9 +280,9 @@ def parse_args():
     parser.add_argument("--rtsp_url_3", type=str, default="rtsp://127.0.0.1:8554/c400_sd3")
     parser.add_argument("--rtsp_url_4", type=str, default="rtsp://127.0.0.1:8554/c400_sd4")
     parser.add_argument("--rtsp_url_5", type=str, default="rtsp://127.0.0.1:8554/c400_sd5")
-    parser.add_argument("--rtsp_url_6", type=str, default="rtsp://127.0.0.1:8554/c400_sd1")
-    parser.add_argument("--rtsp_url_7", type=str, default="rtsp://127.0.0.1:8554/c400_sd2")
-    parser.add_argument("--rtsp_url_8", type=str, default="rtsp://127.0.0.1:8554/c400_sd3")
+    parser.add_argument("--rtsp_url_6", type=str, default="rtsp://127.0.0.1:8554/c400_sd6")
+    parser.add_argument("--rtsp_url_7", type=str, default="rtsp://127.0.0.1:8554/c400_sd7")
+    parser.add_argument("--rtsp_url_8", type=str, default="rtsp://127.0.0.1:8554/c400_sd8")
 
     parser.add_argument("--cam_index_1", type=int, default=0)
     parser.add_argument("--cam_index_2", type=int, default=0)
@@ -314,7 +366,6 @@ class IntegratedCamera:
                     self.ret = True
                     self.decode_ms = current_decode_ms
 
-                # 🌟 保命優化：主動讓出 CPU 時間片
                 time.sleep(0.005)
 
             with self.lock: self.ret = False
@@ -330,36 +381,11 @@ class IntegratedCamera:
         self.stopped = True
         self.thread.join(timeout=1.0)
 
-class StreamBroker:
-    def __init__(self, cam_id, frame_queue):
-        self.cam_id = cam_id
-        self.frame_queue = frame_queue
-        self.latest_frame = None
-        self.condition = threading.Condition()
-        self.stopped = False
-        self.thread = threading.Thread(target=self._broadcast_loop, name=f"Broker-{cam_id}", daemon=True)
-        self.thread.start()
-
-    def _broadcast_loop(self):
-        while not self.stopped:
-            try:
-                frame_bytes = self.frame_queue.get(timeout=1.0)
-                with self.condition:
-                    self.latest_frame = frame_bytes
-                    self.condition.notify_all()
-            except queue.Empty: continue
-            except Exception: pass
-
-    def subscribe(self, timeout=1.0):
-        with self.condition:
-            self.condition.wait(timeout=timeout)
-            return self.latest_frame
 
 # ====================================================================
 # 📉 全局調速器 (CPU Governor)
 # ====================================================================
 def system_governor_thread(shared_dict, hardware_tier):
-    """獨立監控系統負載，根據硬體梯隊自動切換調速邏輯"""
     if not HAS_PSUTIL: return
 
     current_penalty = 0.0
@@ -370,7 +396,6 @@ def system_governor_thread(shared_dict, hardware_tier):
             sys_cpu = psutil.cpu_percent(interval=1.0)
 
             if is_low_tier:
-                # 🚨 TIER_LOW (老 i5): 緊急煞車系統
                 if sys_cpu >= 98.0: current_penalty += 2.0
                 elif sys_cpu >= 92.0: current_penalty += 1.0
                 elif sys_cpu >= 86.0: current_penalty += 0.5
@@ -378,7 +403,6 @@ def system_governor_thread(shared_dict, hardware_tier):
                 elif sys_cpu <= 80.0: current_penalty -= 0.5
                 current_penalty = max(0.0, min(current_penalty, 4.0))
             else:
-                # 🟢 其他硬體: 寬容平滑過渡系統
                 if sys_cpu >= 95.0: current_penalty += 1.0
                 elif sys_cpu >= 90.0: current_penalty += 0.5
                 elif sys_cpu <= 75.0: current_penalty -= 1.0
@@ -400,7 +424,7 @@ def get_model_path_by_strategy(imgsz, format, paths):
 # ====================================================================
 # 🚀 方案 A：單鏡頭 Worker Process (並行架構專用)
 # ====================================================================
-def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared_dict, frame_queue, stop_event, cam_configs, db_queue):
+def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared_dict, shared_frames, stop_event, cam_configs, db_queue):
     torch.set_num_threads(1)
     gc.disable()
 
@@ -452,8 +476,6 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
     cached_active_ids, cached_drawn_boxes, cached_bowl_boxes = [], [], []
     cached_frame_logs, cached_states_dict = [], {}
     cached_trigger_prob, cached_trigger_action = 0.0, ""
-
-    # 🌟 防 0ms 歷史快取
     cached_t_yolo, cached_t_rule, cached_t_action = 0.0, 0.0, 0.0
 
     while not stop_event.is_set():
@@ -466,10 +488,20 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
         prev_frame_time = loop_start
 
         cfg = cam_configs.get(cam_id, {})
-        if cfg.get("imgsz", system_strategy["imgsz"]) != loaded_imgsz:
-            loaded_imgsz = cfg.get("imgsz", system_strategy["imgsz"])
-            try: detector = YOLO(get_model_path_by_strategy(loaded_imgsz, model_format, model_paths), task='detect')
-            except: pass
+        target_imgsz = cfg.get("imgsz", system_strategy["imgsz"])
+        if target_imgsz != loaded_imgsz:
+            try:
+                new_model_path = get_model_path_by_strategy(target_imgsz, model_format, model_paths)
+                print(f"🔄 CAM-{cam_id+1} 正在嘗試切換解析度至 {target_imgsz}p，加載模型: {new_model_path}")
+                new_detector = YOLO(new_model_path, task='detect')
+                detector = new_detector
+                loaded_imgsz = target_imgsz
+                print(f"✅ CAM-{cam_id+1} 解析度切換成功！")
+            except Exception as e:
+                print(f"❌ CAM-{cam_id+1} 切換 {target_imgsz}p 失敗 (可能缺少模型檔案): {e}")
+                rollback_cfg = cam_configs.get(cam_id, {})
+                rollback_cfg["imgsz"] = loaded_imgsz
+                cam_configs[cam_id] = rollback_cfg
 
         ret, raw_frame = cam.read()
         if not ret or raw_frame is None:
@@ -481,7 +513,6 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
         sim_time = frame_idx / 30.0
         should_run_yolo, is_forced_refresh, trigger_record_this_frame = True, False, False
 
-        # MOG2 動態切換
         if tier == "TIER_LOW":
             current_gray = cv2.cvtColor(cv2.resize(raw_frame, MOTION_RESIZE, interpolation=cv2.INTER_NEAREST), cv2.COLOR_BGR2GRAY)
             current_gray = cv2.blur(current_gray, (5, 5))
@@ -492,7 +523,7 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
         fg_mask = bg_subtractor.apply(current_gray)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, morph_kernel)
 
-        if cv2.countNonZero(fg_mask) / (MOTION_RESIZE[0]*MOTION_RESIZE[1]) < 0.001 and record_countdown == 0:
+        if cv2.countNonZero(fg_mask) / (MOTION_RESIZE[0]*MOTION_RESIZE[1]) < 0.0001 and record_countdown == 0:
             should_run_yolo = False
 
         if not should_run_yolo and (int(time.time() / 2.0) % 8 == cam_id % 8) and (time.time() - last_forced_yolo_time > static_refresh_interval):
@@ -529,7 +560,9 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
                         ag.update(raw_frame, box, bowl_boxes, bowl_types, rule_engine, action_recognizer, sim_time)
                         frame_action_time += (time.time() - t_act_start) * 1000
 
-                    pr = ag.get_display_probs()
+                    state, timers, head_box, pr, last_msg = ag.get_info()
+                    if pr is None: pr = {}
+
                     log_data = {"id": real_id, "time": time.strftime("%H:%M:%S"), "bowl": "Yes" if bowl_boxes else "No", "probs": pr, "state": ag.state}
                     current_frame_logs.append(log_data)
                     active_states_dict_cam[str(real_id)] = log_data
@@ -592,10 +625,7 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
 
         ret_img, buffer = cv2.imencode('.jpg', vis, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
         if ret_img:
-            try:
-                while not frame_queue.empty(): frame_queue.get_nowait()
-                frame_queue.put_nowait(buffer.tobytes())
-            except: pass
+            shared_frames[cam_id] = buffer.tobytes()
 
         frame_idx += 1
         sleep_time = target_frame_time - (time.time() - loop_start)
@@ -608,7 +638,7 @@ def worker_process(cam_id, source, is_rtsp, system_strategy, model_paths, shared
 # ====================================================================
 # 🚀 方案 B：集中式引擎 (串行架構專用 - Singleton Pool)
 # ====================================================================
-def centralized_engine_process(configs, is_rtsp, system_strategy, model_paths, shared_dict, frame_queues, stop_event, cam_configs, db_queue, desired_cams_list):
+def centralized_engine_process(configs, is_rtsp, system_strategy, model_paths, shared_dict, shared_frames, stop_event, cam_configs, db_queue, desired_cams_list):
     torch.set_num_threads(1)
     gc.disable()
 
@@ -682,10 +712,20 @@ def centralized_engine_process(configs, is_rtsp, system_strategy, model_paths, s
             if cid not in cams: continue
 
             cfg = cam_configs.get(cid, {})
-            if cfg.get("imgsz", system_strategy["imgsz"]) != loaded_imgsz_dict[cid]:
-                loaded_imgsz_dict[cid] = cfg.get("imgsz", system_strategy["imgsz"])
-                try: detectors[cid] = YOLO(get_model_path_by_strategy(loaded_imgsz_dict[cid], model_format, model_paths), task='detect')
-                except: pass
+            target_imgsz = cfg.get("imgsz", system_strategy["imgsz"])
+            if target_imgsz != loaded_imgsz_dict[cid]:
+                try:
+                    new_model_path = get_model_path_by_strategy(target_imgsz, model_format, model_paths)
+                    print(f"🔄 CAM-{cid+1} 正在嘗試切換解析度至 {target_imgsz}p，加載模型: {new_model_path}")
+                    new_detector = YOLO(new_model_path, task='detect')
+                    detectors[cid] = new_detector
+                    loaded_imgsz_dict[cid] = target_imgsz
+                    print(f"✅ CAM-{cid+1} 解析度切換成功！")
+                except Exception as e:
+                    print(f"❌ CAM-{cid+1} 切換 {target_imgsz}p 失敗: {e}")
+                    rollback_cfg = cam_configs.get(cid, {})
+                    rollback_cfg["imgsz"] = loaded_imgsz_dict[cid]
+                    cam_configs[cid] = rollback_cfg
 
             ret, raw_frame = cams[cid].read()
             if not ret or raw_frame is None:
@@ -707,7 +747,8 @@ def centralized_engine_process(configs, is_rtsp, system_strategy, model_paths, s
                 current_gray = cv2.GaussianBlur(current_gray, (5, 5), 0)
 
             fg_mask = cv2.morphologyEx(bg_subtractors[cid].apply(current_gray), cv2.MORPH_OPEN, morph_kernel)
-            if cv2.countNonZero(fg_mask) / (MOTION_RESIZE[0] * MOTION_RESIZE[1]) < 0.001 and record_countdowns[cid] == 0:
+
+            if cv2.countNonZero(fg_mask) / (MOTION_RESIZE[0] * MOTION_RESIZE[1]) < 0.0001 and record_countdowns[cid] == 0:
                 should_run_yolo = False
 
             current_time = time.time()
@@ -743,7 +784,9 @@ def centralized_engine_process(configs, is_rtsp, system_strategy, model_paths, s
                             ag.update(raw_frame, box, bowl_boxes, bowl_types, rule_engine, action_recognizer, sim_time)
                             frame_action_time += (time.time() - t_act_start) * 1000
 
-                        pr = ag.get_display_probs()
+                        state, timers, head_box, pr, last_msg = ag.get_info()
+                        if pr is None: pr = {}
+
                         log_data = {"id": real_id, "time": time.strftime("%H:%M:%S"), "bowl": "Yes" if bowl_boxes else "No", "probs": pr, "state": ag.state}
                         current_frame_logs.append(log_data)
                         active_states_dict_cam[str(real_id)] = log_data
@@ -808,11 +851,7 @@ def centralized_engine_process(configs, is_rtsp, system_strategy, model_paths, s
 
             ret_img, buffer = cv2.imencode('.jpg', vis, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
             if ret_img:
-                try:
-                    q = frame_queues[cid]
-                    while not q.empty(): q.get_nowait()
-                    q.put_nowait(buffer.tobytes())
-                except: pass
+                shared_frames[cid] = buffer.tobytes()
 
             frame_idx_dict[cid] += 1
 
@@ -830,13 +869,11 @@ def sanitize_for_json(obj):
     elif isinstance(obj, np.ndarray): return sanitize_for_json(obj.tolist())
     else: return obj
 
-def create_flask_app(shared_dict, frame_queues, desired_cams, cams_lock, cam_configs):
+def create_flask_app(shared_dict, shared_frames, desired_cams, cams_lock, cam_configs):
     app = Flask(__name__)
     CORS(app)
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
-
-    brokers = {i: StreamBroker(i, frame_queues[i]) for i in frame_queues.keys()}
 
     @app.route('/api/active_cams', methods=['GET', 'POST'])
     def handle_active_cams():
@@ -902,6 +939,41 @@ def create_flask_app(shared_dict, frame_queues, desired_cams, cams_lock, cam_con
             return jsonify({"success": False, "error": "Record not found"}), 404
         except Exception as e: return jsonify({"success": False, "error": str(e)}), 500
 
+    # 🔥 新增：供前端查詢歷史行為分佈的 API
+    @app.route('/api/behavior_logs', methods=['GET'])
+    def get_behavior_logs():
+        cam_id = request.args.get('cam_id', type=int)
+        start_time = request.args.get('start')
+        end_time = request.args.get('end')
+        
+        if cam_id is None or cam_id < 0 or cam_id > 7:
+            return jsonify({"success": False, "error": "Invalid cam_id"})
+            
+        col_name = f"cam{cam_id}"
+        # 排除為 "None" 的靜止/無寵物畫面
+        query = f"SELECT {col_name}, COUNT(*) FROM behavior_logs WHERE {col_name} != 'None'"
+        params = []
+        
+        if start_time:
+            query += " AND timestamp >= ?"
+            params.append(start_time)
+        if end_time:
+            query += " AND timestamp <= ?"
+            params.append(end_time)
+            
+        query += f" GROUP BY {col_name}"
+        
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            rows = c.execute(query, params).fetchall()
+            conn.close()
+            
+            stats = {r[0]: r[1] for r in rows}
+            return jsonify({"success": True, "stats": stats})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
+
     @app.route('/records/<path:filename>')
     def serve_record(filename): return send_from_directory('records', filename.replace('records/', '').replace('records\\', ''))
 
@@ -909,7 +981,8 @@ def create_flask_app(shared_dict, frame_queues, desired_cams, cams_lock, cam_con
         blank_frame = np.zeros((360, 640, 3), dtype=np.uint8)
         cv2.putText(blank_frame, "STARTING ENGINE...", (140, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 100, 100), 2)
         blank_bytes = cv2.imencode(".jpg", blank_frame)[1].tobytes()
-        broker = brokers.get(cam_id)
+        
+        last_frame = None
 
         try: yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + blank_bytes + b'\r\n')
         except GeneratorExit: return
@@ -922,16 +995,21 @@ def create_flask_app(shared_dict, frame_queues, desired_cams, cams_lock, cam_con
                     time.sleep(0.5)
                     continue
 
-                frame_bytes = broker.subscribe(timeout=0.5)
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + (frame_bytes if frame_bytes else blank_bytes) + b'\r\n')
+                frame_bytes = shared_frames.get(cam_id)
+                
+                if frame_bytes and frame_bytes != last_frame:
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    last_frame = frame_bytes
+                
+                time.sleep(0.04) 
             except GeneratorExit: break
 
     @app.route('/video_feed/<int:cam_id>')
     def video_feed(cam_id): return Response(generate_frames(cam_id), mimetype='multipart/x-mixed-replace; boundary=frame')
     return app
 
-def run_flask_server(shared_dict, frame_queues, desired_cams, cams_lock, cam_configs):
-    app = create_flask_app(shared_dict, frame_queues, desired_cams, cams_lock, cam_configs)
+def run_flask_server(shared_dict, shared_frames, desired_cams, cams_lock, cam_configs):
+    app = create_flask_app(shared_dict, shared_frames, desired_cams, cams_lock, cam_configs)
     if HAS_WAITRESS: serve(app, host='0.0.0.0', port=9527, threads=16)
     else: app.run(host='0.0.0.0', port=9527, debug=False, use_reloader=False, threaded=True)
 
@@ -970,7 +1048,9 @@ if __name__ == '__main__':
     shared_dict = manager.dict()
     shared_dict["global_penalty"] = 0.0
     cam_configs = manager.dict()
-    frame_queues = {i: mp.Queue(maxsize=1) for i in range(ARGS.num_cams)}
+    
+    shared_frames = manager.dict()
+    
     db_queue = mp.Queue()
     desired_cams = manager.list([0])
     cams_lock = manager.Lock()
@@ -1001,17 +1081,19 @@ if __name__ == '__main__':
     print(f"  ▶ 系統調速器模式 : {'🚨 嚴格階梯防卡死 (Max -4.0)' if system_strategy['tier'] == 'TIER_LOW' else '🟢 寬容平滑過渡 (Max -2.5)'}")
     print("="*85 + "\n")
 
-    threading.Thread(target=run_flask_server, args=(shared_dict, frame_queues, desired_cams, cams_lock, cam_configs), daemon=True).start()
+    threading.Thread(target=run_flask_server, args=(shared_dict, shared_frames, desired_cams, cams_lock, cam_configs), daemon=True).start()
     threading.Thread(target=db_writer_thread, args=(db_queue,), daemon=True).start()
     threading.Thread(target=db_cleanup_thread, daemon=True).start()
     threading.Thread(target=system_governor_thread, args=(shared_dict, system_strategy['tier']), daemon=True).start()
+    
+    # 🔥 啟動每秒行為日誌寫入執行緒
+    threading.Thread(target=behavior_logger_thread, args=(shared_dict,), daemon=True).start()
 
-    # 🌟 根據策略智能路由
     if system_strategy["processing_mode"] == "sequential":
         engine_stop_event = mp.Event()
         engine_process = mp.Process(
             target=centralized_engine_process,
-            args=(configs, is_rtsp, system_strategy, model_paths, shared_dict, frame_queues, engine_stop_event, cam_configs, db_queue, desired_cams),
+            args=(configs, is_rtsp, system_strategy, model_paths, shared_dict, shared_frames, engine_stop_event, cam_configs, db_queue, desired_cams),
             name="Singleton-Inference-Engine"
         )
         engine_process.daemon = True
@@ -1024,7 +1106,6 @@ if __name__ == '__main__':
 
     try:
         while True:
-            # 並行模式：主進程負責動態生成/關閉 Worker
             if system_strategy["processing_mode"] == "parallel":
                 with cams_lock: current_desired = set(desired_cams)
 
@@ -1034,22 +1115,20 @@ if __name__ == '__main__':
                         active_processes[cid].join(timeout=3)
                         if active_processes[cid].is_alive(): active_processes[cid].terminate()
                         del active_processes[cid]; del stop_events[cid]
-                        try: frame_queues[cid].close(); frame_queues[cid].cancel_join_thread()
-                        except: pass
-                        frame_queues[cid] = mp.Queue(maxsize=1)
+                        
+                        shared_frames.pop(cid, None) 
                         shared_dict[cid] = {"stats": {"status": "offline", "fps": 0, "camId": cid, "name": shared_dict.get(cid, {}).get("stats", {}).get("name")}, "logs": [], "active_states": {}}
 
                 for cid in current_desired:
                     if cid not in active_processes and cid < ARGS.num_cams:
                         src = configs[cid][0] if is_rtsp else configs[cid][1]
                         stop_evt = mp.Event()
-                        p = mp.Process(target=worker_process, args=(cid, src, is_rtsp, system_strategy, model_paths, shared_dict, frame_queues[cid], stop_evt, cam_configs, db_queue), name=f"Worker-{cid+1}")
+                        p = mp.Process(target=worker_process, args=(cid, src, is_rtsp, system_strategy, model_paths, shared_dict, shared_frames, stop_evt, cam_configs, db_queue), name=f"Worker-{cid+1}")
                         p.daemon = True
                         p.start()
                         active_processes[cid] = p
                         stop_events[cid] = stop_evt
 
-            # 共用的監控日誌輸出
             current_time = time.time()
             if current_time - last_report_time >= 5.0:
                 last_report_time = current_time

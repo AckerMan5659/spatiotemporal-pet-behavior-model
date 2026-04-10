@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
     ArrowLeft, Camera, Circle, Activity, Wifi, Settings,
-    Square, AlertTriangle, FileImage, FileVideo, Download, Trash2, Play,
-    Power, WifiOff, Loader2
+    AlertTriangle, Power, WifiOff, Loader2, Clock, Search
 } from 'lucide-react';
 import { Language, Theme } from '../App';
 import { t } from '../utils/translations';
-import { getVideoFeedUrl, fetchCameraStats, getActiveCameras, setActiveCameras } from '../services/api';
+import { getVideoFeedUrl, fetchCameraStats, getActiveCameras, setActiveCameras, API_BASE_URL } from '../services/api';
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 interface LiveMonitoringProps {
     language: Language;
@@ -14,13 +14,6 @@ interface LiveMonitoringProps {
     cameraId: string;
     cameraName: string;
     onBack: () => void;
-}
-
-interface MediaItem {
-    id: string;
-    type: 'image' | 'video';
-    url: string;
-    timestamp: number;
 }
 
 interface AlertEvent {
@@ -36,8 +29,6 @@ export function LiveMonitoring({ language, theme, cameraId, cameraName, onBack }
 
     const [currentStats, setCurrentStats] = useState({ behavior: 'Rest', confidence: 0 });
     const [fps, setFps] = useState(0);
-    const [showSettings, setShowSettings] = useState(false);
-    const [isRecording, setIsRecording] = useState(false);
 
     const [apiOffline, setApiOffline] = useState(true);
     const [isLoading, setIsLoading] = useState(true);
@@ -47,19 +38,23 @@ export function LiveMonitoring({ language, theme, cameraId, cameraName, onBack }
     const [serverActiveCams, setServerActiveCams] = useState<number[]>([]);
     const [isActiveOnServer, setIsActiveOnServer] = useState(false);
 
-    const [mediaGallery, setMediaGallery] = useState<MediaItem[]>([]);
     const [alerts, setAlerts] = useState<AlertEvent[]>([
         { id: 1, time: '10:23:45', message: 'Detected Jumping', level: 'medium' },
         { id: 2, time: '09:12:30', message: 'No Motion for 1h', level: 'medium' },
     ]);
 
     const imgRef = useRef<HTMLImageElement>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const chunksRef = useRef<Blob[]>([]);
-    const recordingTimerRef = useRef<number | null>(null);
 
-    // 🔥 幽灵连接彻底清理
+    const [historicalStats, setHistoricalStats] = useState<Record<string, number>>({});
+    const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d' | 'custom'>('1h');
+    const [customStart, setCustomStart] = useState('');
+    const [customEnd, setCustomEnd] = useState('');
+    const [isFetchingHistory, setIsFetchingHistory] = useState(false);
+
+    const behaviorColors: Record<string, string> = {
+        Eat: '#83B5B5', Drink: '#9bc5c5', Rest: '#BFC5D5', Jump: '#E0BBE4', Act: '#BBD5D4',
+    };
+
     useEffect(() => {
         const currentImg = imgRef.current;
         return () => {
@@ -158,12 +153,68 @@ export function LiveMonitoring({ language, theme, cameraId, cameraName, onBack }
         return () => clearInterval(interval);
     }, [streamIndex, videoError]);
 
-    const handleSnapshot = () => { /* 实现省略 */ };
-    const handleToggleRecording = () => { /* 实现省略 */ };
-    const startRecording = () => { /* 实现省略 */ };
-    const stopRecording = () => { /* 实现省略 */ };
-    const downloadMedia = (item: MediaItem) => { /* 实现省略 */ };
-    const deleteMedia = (id: string) => { /* 实现省略 */ };
+    const fetchHistoricalBehavior = async () => {
+        setIsFetchingHistory(true);
+        try {
+            let start = '';
+            let end = '';
+            const now = new Date();
+
+            if (timeRange === '1h') {
+                start = new Date(now.getTime() - 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
+            } else if (timeRange === '24h') {
+                start = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
+            } else if (timeRange === '7d') {
+                start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
+            } else if (timeRange === 'custom') {
+                if (customStart) {
+                    start = customStart.replace('T', ' ');
+                    if (start.split(':').length === 2) start += ':00';
+                }
+                if (customEnd) {
+                    end = customEnd.replace('T', ' ');
+                    if (end.split(':').length === 2) end += ':59';
+                }
+            }
+
+            let url = `${API_BASE_URL}/api/behavior_logs?cam_id=${streamIndex}`;
+            if (start) url += `&start=${encodeURIComponent(start)}`;
+            if (end) url += `&end=${encodeURIComponent(end)}`;
+
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.success && data.stats) {
+                setHistoricalStats(data.stats);
+            } else {
+                setHistoricalStats({});
+            }
+        } catch (e) {
+            console.error('Failed to fetch behavior history:', e);
+            setHistoricalStats({});
+        } finally {
+            setIsFetchingHistory(false);
+        }
+    };
+
+    useEffect(() => {
+        if (timeRange !== 'custom') {
+            fetchHistoricalBehavior();
+        }
+        
+        let interval: any;
+        if (timeRange === '1h') {
+            interval = setInterval(fetchHistoricalBehavior, 10000);
+        }
+        return () => clearInterval(interval);
+    }, [timeRange, streamIndex]);
+
+    const pieData = Object.entries(historicalStats)
+        .filter(([_, value]) => value > 0)
+        .map(([name, value]) => ({
+            name: name,
+            value: value,
+            color: behaviorColors[name] || '#ccc'
+        }));
 
     const isActuallyOffline = apiOffline || videoError;
     const isConnecting = !apiOffline && !videoError && isLoading;
@@ -171,7 +222,6 @@ export function LiveMonitoring({ language, theme, cameraId, cameraName, onBack }
 
     return (
         <div className="h-full flex flex-col">
-            <canvas ref={canvasRef} className="hidden" />
 
             <div className={`${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} border-b px-6 py-4 flex items-center justify-between shrink-0`}>
                 <div className="flex items-center gap-4">
@@ -278,7 +328,7 @@ export function LiveMonitoring({ language, theme, cameraId, cameraName, onBack }
                     </div>
 
                     <div className="w-96 flex flex-col gap-6">
-                        <div className={`flex-1 ${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-2xl shadow-lg border p-4 overflow-hidden flex flex-col`}>
+                        <div className={`h-[30%] min-h-[200px] ${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-2xl shadow-lg border p-4 flex flex-col`}>
                             <div className="flex items-center gap-2 mb-4 pb-2 border-b border-gray-100 dark:border-gray-700 shrink-0">
                                 <AlertTriangle className="w-5 h-5 text-orange-500" />
                                 <h3 className={`font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-800'}`}>异常提示</h3>
@@ -293,22 +343,99 @@ export function LiveMonitoring({ language, theme, cameraId, cameraName, onBack }
                             </div>
                         </div>
 
-                        <div className={`flex-1 ${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-2xl shadow-lg border p-4 overflow-hidden flex flex-col`}>
-                            <div className="flex items-center gap-2 mb-4 pb-2 border-b border-gray-100 dark:border-gray-700 shrink-0">
-                                <FileImage className="w-5 h-5 text-blue-500" />
-                                <h3 className={`font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-800'}`}>快照 & 录像</h3>
-                                <span className="ml-auto text-xs bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded-full text-gray-500">{mediaGallery.length}</span>
-                            </div>
-                            <div className="flex-1 overflow-y-auto pr-2 scrollbar-thin">
-                                {mediaGallery.length === 0 ? <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-2"><Camera className="w-8 h-8 opacity-20" /><p className="text-sm">点击左侧按钮抓拍或录制</p></div> : <div className="grid grid-cols-2 gap-3">
-                                    {mediaGallery.map(item => (
-                                        <div key={item.id} className="relative group aspect-video bg-black/10 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                                            {item.type === 'image' ? <img src={item.url} alt="snapshot" className="w-full h-full object-cover" /> : <video src={item.url} className="w-full h-full object-cover" />}
-                                            <div className="absolute top-1 left-1 bg-black/60 px-1.5 rounded text-[10px] text-white flex items-center gap-1">{item.type === 'image' ? <FileImage className="w-3 h-3" /> : <FileVideo className="w-3 h-3" />}{item.type === 'video' && 'REC'}</div>
+                        {/* 歷史行為統計分析圖 */}
+                        <div className={`flex-1 ${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-2xl shadow-lg border p-4 flex flex-col overflow-hidden`}>
+                            
+                            <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-100 dark:border-gray-700 shrink-0 relative z-20">
+                                <div className="flex items-center gap-2">
+                                    <Clock className="w-5 h-5 text-blue-500" />
+                                    <h3 className={`font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-800'}`}>歷史行為統計</h3>
+                                </div>
+                                
+                                <div className="relative">
+                                    <select 
+                                        value={timeRange} 
+                                        onChange={(e: any) => setTimeRange(e.target.value)}
+                                        className={`text-xs p-1.5 rounded border outline-none focus:ring-1 focus:ring-primary cursor-pointer ${theme === 'dark' ? 'bg-gray-900 border-gray-600 text-white' : 'bg-gray-50 border-gray-300 text-gray-800'}`}
+                                    >
+                                        <option value="1h">近 1 小時</option>
+                                        <option value="24h">近 24 小時</option>
+                                        <option value="7d">近 7 天</option>
+                                        <option value="custom">自訂時間</option>
+                                    </select>
+
+                                    {timeRange === 'custom' && (
+                                        <div className={`absolute top-full right-0 mt-2 p-3 rounded-xl border shadow-2xl flex flex-col gap-3 w-56 z-50 ${theme === 'dark' ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <label className={`text-[10px] font-bold ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>開始時間</label>
+                                                <input 
+                                                    type="datetime-local" 
+                                                    step="1"
+                                                    value={customStart} 
+                                                    onChange={(e) => setCustomStart(e.target.value)} 
+                                                    className={`w-full text-xs p-1.5 border rounded outline-none focus:ring-1 focus:ring-primary ${theme === 'dark' ? 'bg-gray-900 border-gray-600 text-white [color-scheme:dark]' : 'bg-white border-gray-300 text-gray-800'}`} 
+                                                />
+                                            </div>
+                                            <div className="flex flex-col gap-1">
+                                                <label className={`text-[10px] font-bold ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>結束時間</label>
+                                                <input 
+                                                    type="datetime-local" 
+                                                    step="1"
+                                                    value={customEnd} 
+                                                    onChange={(e) => setCustomEnd(e.target.value)} 
+                                                    className={`w-full text-xs p-1.5 border rounded outline-none focus:ring-1 focus:ring-primary ${theme === 'dark' ? 'bg-gray-900 border-gray-600 text-white [color-scheme:dark]' : 'bg-white border-gray-300 text-gray-800'}`} 
+                                                />
+                                            </div>
+                                            <button 
+                                                onClick={fetchHistoricalBehavior}
+                                                disabled={!customStart || !customEnd || isFetchingHistory}
+                                                className="w-full mt-1 py-1.5 rounded-lg bg-primary hover:bg-primary/90 text-white text-xs font-bold transition-all disabled:opacity-50 shadow-md flex items-center justify-center gap-1"
+                                            >
+                                                {isFetchingHistory ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
+                                                套用查詢
+                                            </button>
                                         </div>
-                                    ))}
-                                </div>}
+                                    )}
+                                </div>
                             </div>
+
+                            {/* 🔥 餅圖區域：增加了外層容器的高度與餅圖的內外半徑 */}
+                            <div className="flex-1 w-full relative min-h-[180px] z-10 mt-2">
+                                {isFetchingHistory ? (
+                                    <div className="absolute inset-0 flex items-center justify-center">
+                                        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                                    </div>
+                                ) : pieData.length > 0 ? (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <PieChart>
+                                            <Pie 
+                                                data={pieData} 
+                                                cx="50%" cy="50%" 
+                                                innerRadius={65}   /* 半徑調大 */
+                                                outerRadius={95}   /* 半徑調大 */
+                                                paddingAngle={5} dataKey="value"
+                                                animationDuration={500}
+                                            >
+                                                {pieData.map((entry, index) => (
+                                                    <Cell key={`cell-${index}`} fill={entry.color} strokeWidth={0} />
+                                                ))}
+                                            </Pie>
+                                            <Tooltip 
+                                                formatter={(value: number, name: string) => [`${value} 幀/秒`, t(name, language)]}
+                                                contentStyle={{ backgroundColor: theme === 'dark' ? '#1f2937' : '#fff', border: `1px solid ${theme === 'dark' ? '#374151' : '#e5e7eb'}`, borderRadius: '12px', color: theme === 'dark' ? '#fff' : '#000', fontSize: '12px', padding: '4px 8px' }}
+                                            />
+                                            <Legend formatter={(value) => t(value, language)} verticalAlign="bottom" height={24} iconSize={10} wrapperStyle={{ fontSize: '12px' }} />
+                                        </PieChart>
+                                    </ResponsiveContainer>
+                                ) : (
+                                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                        <p className={`text-sm ${theme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`}>無該時段之活動紀錄</p>
+                                    </div>
+                                )}
+                            </div>
+                            <p className="text-[9px] text-gray-400 text-center mt-3 shrink-0 relative z-10">
+                                * 若畫面存在多目標，已取比例最高之主導行為。
+                            </p>
                         </div>
                     </div>
                 </div>

@@ -27,6 +27,12 @@ interface HistoryPoint {
     camData: Record<string, Record<string, { behavior: string, probs: Record<string, number> }>>;
 }
 
+// 🏥 自訂攝影機 (病房) 名稱對應表
+const CUSTOM_CAM_NAMES = [
+    "中心病房1", "中心病房2", "隔離病房1", "隔離病房2",
+    "貓病房1", "貓房1", "貓病房2", "貓房2"
+];
+
 export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToMonitoring }: DashboardProps) {
     const [selectedCamera, setSelectedCamera] = useState<string | null>(null);
     const [quickCameras, setQuickCameras] = useState<QuickCamera[]>([]);
@@ -85,7 +91,6 @@ export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToM
 
                 const camKeys = Object.keys(data).filter(k => !isNaN(Number(k)));
 
-                // 🌟 核心修復：動態擷取系統最高負載，不再死綁在 data["0"] 上
                 let maxYolo = 0;
                 let maxLogic = 0;
                 camKeys.forEach(k => {
@@ -97,10 +102,8 @@ export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToM
                     }
                 });
 
-                // 更新頂部儀表板性能資料
                 setPerfStats({ yoloMs: maxYolo, logicMs: maxLogic });
 
-                // 🔥 將最大顯示數量從 6 改為 8
                 const numCamsToShow = Math.max(camKeys.length, 8);
 
                 for (let i = 0; i < numCamsToShow; i++) {
@@ -149,13 +152,12 @@ export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToM
                         }
                     }
 
-                    // 🔥 完全依賴後端提供的動態名稱，若無則降級為 Camera X
-                    const backendName = camData?.stats?.name;
-                    const finalCamName = backendName ? backendName : `Camera ${i + 1}`;
+                    // 🏥 套用自訂的病房名稱
+                    const finalCamName = CUSTOM_CAM_NAMES[i] || `Camera ${i + 1}`;
 
                     newCameras.push({
                         id: displayId,
-                        name: finalCamName, // 🔥 使用動態名稱
+                        name: finalCamName,
                         status: status,
                         currentBehavior: mainBehavior,
                         confidence: mainConfidence,
@@ -316,7 +318,7 @@ export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToM
                                     }
                                     `}
                                 >
-                                    CAM-{index + 1} {isOn ? 'ON' : 'OFF'}
+                                    {CUSTOM_CAM_NAMES[index]} {isOn ? 'ON' : 'OFF'}
                                 </button>
                             );
                         })}
@@ -364,7 +366,7 @@ export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToM
                                 <LayoutGrid className="w-3 h-3" /> All Cams
                             </button>
                             {quickCameras.map(cam => (
-                                <button key={cam.id} onClick={() => { setSelectedCamTab(cam.streamIndex.toString()); setSelectedTrackId('all'); }} className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap ${selectedCamTab === cam.streamIndex.toString() ? 'bg-white text-primary shadow-sm' : theme === 'dark' ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-800'}`}>{cam.id}</button>
+                                <button key={cam.id} onClick={() => { setSelectedCamTab(cam.streamIndex.toString()); setSelectedTrackId('all'); }} className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap ${selectedCamTab === cam.streamIndex.toString() ? 'bg-white text-primary shadow-sm' : theme === 'dark' ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-800'}`}>{cam.name}</button>
                             ))}
                         </div>
                         {selectedCamTab !== 'all' && (
@@ -394,7 +396,7 @@ export function Dashboard({ language, theme, onOpenLiveMonitoring, onNavigateToM
                         <div className="w-10 h-10 bg-neutral rounded-xl flex items-center justify-center shadow-md"><Target className="w-5 h-5 text-white" /></div>
                         <div>
                             <h3 className={`text-lg font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-800'}`}>{t('behaviorDistribution', language)}</h3>
-                            <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} flex items-center gap-1`}><Info className="w-3 h-3" />{selectedCamTab === 'all' ? '所有在線攝影機統計' : `${quickCameras.find(c => c.streamIndex.toString() === selectedCamTab)?.id || 'Selected'} 攝影機統計`}</p>
+                            <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} flex items-center gap-1`}><Info className="w-3 h-3" />{selectedCamTab === 'all' ? '所有在線攝影機統計' : `${quickCameras.find(c => c.streamIndex.toString() === selectedCamTab)?.name || 'Selected'} 攝影機統計`}</p>
                         </div>
                     </div>
                     <div className="relative">
@@ -522,7 +524,7 @@ function QuickCameraCard({ camera, language, theme, isSelected, onClick, onOpenL
                             <span className="text-xs font-bold text-white">LIVE</span>
                         </div>
                         <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-3 py-1 rounded-lg z-10">
-                            <span className="text-xs font-medium text-white">{camera.id}</span>
+                            <span className="text-xs font-medium text-white">{camera.name}</span>
                         </div>
                         {camera.activeIds.length > 0 && (
                             <div className="absolute bottom-2 left-2 glass px-2 py-1 rounded-lg flex items-center gap-1">

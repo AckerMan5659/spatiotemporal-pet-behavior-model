@@ -139,10 +139,12 @@ class FusionAgent:
 
     def _fuse_logic(self, rule_state, interact_type, model_probs, recognizer):
         probs = model_probs if model_probs is not None else self.last_model_pred
-        p_eat = recognizer.get_class_prob(probs, "eat")
-        p_drink = recognizer.get_class_prob(probs, "drink")
-        p_active = recognizer.get_class_prob(probs, "active")
-        p_rest = recognizer.get_class_prob(probs, "rest")
+        
+        # 安全获取概率，如果字典为空则默认给 0.0
+        p_eat = probs.get("eat", 0.0) if probs else 0.0
+        p_drink = probs.get("drink", 0.0) if probs else 0.0
+        p_active = probs.get("active", 0.0) if probs else 0.0
+        p_rest = probs.get("rest", 0.0) if probs else 0.0
 
         if probs is not None and self.seq_idx % 10 == 0:
             print(f"🔍 [Prob Monitor] ID:{self.track_id} | Bowl:{interact_type} | Eat:{p_eat:.3f} Drink:{p_drink:.3f}")

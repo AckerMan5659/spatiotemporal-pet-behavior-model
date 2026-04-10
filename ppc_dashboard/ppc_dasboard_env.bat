@@ -25,7 +25,7 @@ echo [INFO] 正在加载智能环境安装脚本并解除安全限制...
 echo ==========================================
 
 :: 3. 核心机制：呼叫 PowerShell 提取自身底部嵌的代码并绕过执行策略 (Bypass) 运行
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$script = Get-Content '%~f0' -Raw; $code = $script -replace '(?s)^.*<#POWERSHELL_START#>\r?\n', ''; Invoke-Expression $code"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$script = Get-Content '%~f0' -Encoding UTF8 -Raw; $code = $script -replace '(?s)^.*<#POWERSHELL_START#>\r?\n', ''; Invoke-Expression $code"
 exit /b
 
 <#POWERSHELL_START#>

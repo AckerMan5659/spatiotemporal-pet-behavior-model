@@ -18,7 +18,7 @@ task_configs:
   # --- NORMAL 模式 ---
   normal:
     dataset_path: "D:/Desktop/PET1/cropped_dataset/normal"
-    class_names: ["active", "eat", "rest", "drink", "jump"]    #1. ["active", "rest", "sleep", "eat", "drink", "defecate", "jump"]  2.["walk", "run", "sit", "stand", "lie", "eat"]
+    class_names: ["eat", "drink", "other"]    #1. ["active", "rest", "sleep", "eat", "drink", "defecate", "jump"]  2.["walk", "run", "sit", "stand", "lie", "eat"]
     num_classes: 5             # 保留原本的功能適配
     output_model_name: "model/repvit_m1_gru_fixed.onnx"
 

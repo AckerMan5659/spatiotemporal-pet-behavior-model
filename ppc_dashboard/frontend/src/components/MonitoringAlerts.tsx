@@ -24,6 +24,12 @@ interface Camera {
     imgsz: number;
 }
 
+// 🏥 自訂攝影機 (病房) 名稱對應表
+const CUSTOM_CAM_NAMES = [
+    "中心病房1", "中心病房2", "隔離病房1", "隔離病房2",
+    "貓病房1", "貓房1", "貓病房2", "貓房2"
+];
+
 export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: MonitoringAlertsProps) {
     const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
     const [searchQuery, setSearchQuery] = useState('');
@@ -115,7 +121,6 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
 
             const camKeys = Object.keys(data).filter(k => !isNaN(Number(k)));
 
-            // 🌟 核心修復：動態尋找在線攝影機的最高耗時，不再被 "0" 號攝影機卡死
             let maxYolo = 0, maxRule = 0, maxAction = 0;
             camKeys.forEach(k => {
                 const s = data[k]?.stats;
@@ -126,7 +131,6 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                 }
             });
 
-            // 只要有任何一個攝影機在運算，就更新性能面板
             setPerfStats({ yoloMs: maxYolo, ruleMs: maxRule, actionMs: maxAction });
 
             const totalCams = Math.max(camKeys.length, 8);
@@ -165,9 +169,8 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                     }
                 }
 
-                // 🔥 完全依賴後端提供的動態名稱，若無則降級為 Camera X
-                const backendName = camData?.stats?.name;
-                const finalCamName = backendName ? backendName : `Camera ${i + 1}`;
+                // 🏥 套用自訂的病房名稱
+                const finalCamName = CUSTOM_CAM_NAMES[i] || `Camera ${i + 1}`;
 
                 newCameras.push({
                     id: displayId,
@@ -215,7 +218,7 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                             className={`block w-40 px-3 py-2 text-sm rounded-lg border ${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : 'bg-gray-50 border-gray-300'}`}
                         >
                             <option value="all">所有攝影機 (All)</option>
-                            {[...Array(8)].map((_, i) => <option key={i} value={i+1}>CAM-{i+1}</option>)}
+                            {[...Array(8)].map((_, i) => <option key={i} value={i+1}>{CUSTOM_CAM_NAMES[i]}</option>)}
                         </select>
                     </div>
                     <div className="space-y-1">
@@ -276,7 +279,7 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                                         <PlayCircle className="w-16 h-16 text-white opacity-80" />
                                     </div>
                                     <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-xs font-bold text-white shadow-sm">
-                                        CAM-{rec.cam_id}
+                                        {CUSTOM_CAM_NAMES[rec.cam_id - 1] || `CAM-${rec.cam_id}`}
                                     </div>
                                     <div className="absolute top-2 right-2 bg-red-600 px-2 py-1 rounded text-xs font-bold text-white shadow-sm flex items-center gap-1">
                                         <div className="w-1.5 h-1.5 bg-white rounded-full"></div>
@@ -301,7 +304,7 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                                 <div>
                                     <h3 className="text-lg font-bold text-white flex items-center gap-2">
                                         <PlayCircle className="w-5 h-5 text-blue-500" />
-                                        CAM-{playingVideo.cam_id} 異常事件回放
+                                        {CUSTOM_CAM_NAMES[playingVideo.cam_id - 1] || `CAM-${playingVideo.cam_id}`} 異常事件回放
                                     </h3>
                                     <p className="text-xs text-gray-400 mt-1">觸發動作: {t(playingVideo.trigger_action, language)} | 時間: {playingVideo.start_time}</p>
                                 </div>
@@ -382,7 +385,7 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                                 ${isOn ? 'bg-primary text-white border-primary shadow-md hover:bg-primary/90' : theme === 'dark' ? 'bg-gray-900 text-gray-400 border-gray-700 hover:text-white' : 'bg-gray-100 text-gray-500 border-gray-200 hover:text-gray-800'}
                             `}
                         >
-                            CAM-{index + 1} {isOn ? 'ON' : 'OFF'}
+                            {CUSTOM_CAM_NAMES[index]} {isOn ? 'ON' : 'OFF'}
                         </button>
                     );
                 })}
@@ -425,7 +428,7 @@ export function MonitoringAlerts({ language, theme, onOpenLiveMonitoring }: Moni
                         <div className="flex items-center justify-between p-4 border-b border-gray-500/20">
                             <h3 className="text-lg font-bold flex items-center gap-2">
                                 <Settings className="w-5 h-5 text-primary" />
-                                CAM-{configModalOpen + 1} 運算與錄影設定
+                                {CUSTOM_CAM_NAMES[configModalOpen] || `CAM-${configModalOpen + 1}`} 運算與錄影設定
                             </h3>
                             <button onClick={() => setConfigModalOpen(null)} className="p-1 hover:bg-gray-500/20 rounded-lg transition-colors"><X className="w-5 h-5" /></button>
                         </div>
@@ -599,7 +602,7 @@ function CameraCard({ camera, language, theme, highlighted, onClick, onOpenConfi
                                 {camera.imgsz}p
                             </div>
                             <div className="bg-black/70 backdrop-blur-sm px-3 py-1 rounded-lg text-xs font-medium text-white shadow-md">
-                                {camera.id}
+                                {camera.name}
                             </div>
                         </div>
 
