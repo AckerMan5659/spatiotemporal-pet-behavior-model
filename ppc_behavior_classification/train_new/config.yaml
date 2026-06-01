@@ -1,0 +1,184 @@
+# =================================================================
+# 1. 全局設置 (7-class merged dataset, hierarchical training)
+# =================================================================
+mode: "merged_7cls"
+
+# 推理管道配置
+pipeline:
+  output_dir: outputs_new
+  min_box_size: 32
+  frame_skip: 4
+
+# =================================================================
+# 2. 數據集配置
+# =================================================================
+dataset:
+  # 与 dataset_summary.md 对齐: train(4435) / val(1098)，每个样本一个文件夹，
+  # 内含 frame_0000 ~ frame_0015 (16 帧) + label.txt (单行 0-6)
+  root: "D:/Desktop/PPC/merged_dataset"
+  num_classes: 7
+  seq_len: 16
+  imgsz: 224
+  splits: ["train", "val"]
+
+  # label -> 类别名 (与 summary 表保持一致)
+  class_names:
+    - other        # 0  normal
+    - eat          # 1  normal / ingestion
+    - drink        # 2  normal / ingestion
+    - convulsion   # 3  abnormal
+    - limp         # 4  abnormal
+    - sneeze       # 5  abnormal
+    - vomit        # 6  abnormal
+
+  # 训练样本计数 (用于自动 class weight / focal alpha 等)
+  class_counts_train:
+    0: 1552
+    1: 585
+    2: 469
+    3: 548
+    4: 293         # ← 最少, 仅 other 的 18.9%, 易过拟合
+    5: 454
+    6: 534
+
+  # 数据增强 — 7 类 (类间相似度更高) 需要更强的扰动避免过拟合
+  augment:
+    scale_min: 0.85          # 0.9  -> 0.85   尺度抖动加大
+    scale_max: 1.15          # 1.1  -> 1.15
+    rotate: 20               # 15   -> 20
+    translate: 0.12          # 0.10 -> 0.12
+    fliplr: 0.5
+    brightness: 0.18         # 0.10 -> 0.18   光照鲁棒性
+    contrast: 0.18           # 0.10 -> 0.18
+    random_erase_p: 0.25     # 新增: 随机遮挡, 防背诵
+    color_jitter_sat: 0.2    # 新增
+    color_jitter_hue: 0.05   # 新增
+
+  # 跨样本正则: MixUp / CutMix (类别越多越能稳定决策边界)
+  mixup:
+    enabled: true
+    alpha: 0.2               # Beta(α,α), 推荐 0.1-0.3
+    cutmix_alpha: 1.0
+    prob: 0.5                # 50% 的 batch 走 mixup, 其余原样
+    switch_prob: 0.5         # mixup 与 cutmix 各一半
+
+# =================================================================
+# 3. 分層目標 (Targets) - 优先级 T1 > T2 > T3
+# =================================================================
+# Target 1 二分类:  Normal {0,1,2}  vs  Abnormal {3,4,5,6}
+# Target 2 吃喝:    Ingestion {1,2} vs  Other {0}  (仅作用于 Normal 子集)
+# Target 3 细粒度: 7 类 cross-entropy
+hierarchical:
+  normal_ids:    [0, 1, 2]
+  abnormal_ids:  [3, 4, 5, 6]
+  ingestion_ids: [1, 2]
+  other_id:      0
+
+  # Loss 权重 (T1 > T2 > T3) — 类别变多后, 适度降低 T1 以让 T3 有更多优化空间
+  w_t1_binary:     1.8       # 2.0  -> 1.8   (略降, 避免压制 T3)
+  w_t2_ingestion:  1.2
+  w_t3_fine:       1.2       # 1.0  -> 1.2   (略升, 7 类 CE 本身更难)
+
+  # 7 类比 3/5 类需要更强的"软目标"以防过拟合 + 抵抗 limp 不平衡
+  label_smoothing: 0.15      # 0.10 -> 0.15
+  use_class_weight: true
+  focal_gamma: 1.0           # 0.0  -> 1.0   (启用 focal, 帮助 limp 等少数类)
+
+# =================================================================
+# 4. Teacher 微調 (Phase 1) — Swin3D-B
+# =================================================================
+teacher:
+  arch: "swin3d_b"
+  pretrained: "kinetics400"
+  checkpoint_path: null
+  output_dir: "outputs_new/teacher_finetuned_7cls"
+  output_name: "teacher_best_7cls_ema.pth"
+
+  batch_size: 4
+  accum_steps: 8             # effective batch = 32
+  epochs: 50                 # 35 -> 50  (7 类决策面更复杂, 需要更多步)
+  lr: 3e-5                   # 4e-5 -> 3e-5 (轻微降低, 配合更长训练)
+  warmup_epochs: 3           # 新增: 防初期发散 (Swin head 全新)
+  min_lr: 5e-7               # 新增: 余弦衰减底部 (更彻底收敛)
+  weight_decay: 0.05         # 0.1  -> 0.05 (StochasticDepth/Dropout 已较强)
+  drop_path: 0.3             # 0.2  -> 0.3  (7 类对 backbone 容量需求更高也更易过拟合)
+  ema_decay: 0.9995          # 0.995 -> 0.9995 (数据更多, EMA 更平滑)
+  num_workers: 4
+  patience: 12               # 7    -> 12   (类别多, 早期 val 波动大)
+  grad_clip: 1.0
+  use_mixup: true            # 启用 batch 内 MixUp/CutMix
+  freeze_backbone_epochs: 1  # 新增: 前 1 epoch 只训 head, 防大梯度毁坏 K400 权重
+
+# =================================================================
+# 5. 蒸馏 (Phase 2) — Swin3D-B -> RepViT-GRU
+# =================================================================
+distillation:
+  enabled: true
+  teacher_checkpoint: "outputs_new/teacher_finetuned_7cls/teacher_best_7cls_ema.pth"
+  student_backbone: "repvit_m1"
+  student_hidden_dim: 256
+  student_pretrained: true
+
+  output_dir: "outputs_new/distilled_7cls"
+  output_name: "repvit_best_distilled_7cls_ema.pth"
+  onnx_export_name: "repvit_best_distilled_7cls.onnx"
+
+  # Loss 权重
+  alpha_feat: 0.6            # 1.0 -> 0.6   (RepViT 难完全模仿 Swin 7-cls 的 stage 特征)
+  beta_kd:    6.0            # 8.0 -> 6.0   (类别多时单纯抄 logits 不够, 给 GT 更多权重)
+  gamma_gt:   1.2            # 1.0 -> 1.2   (与 hier.w_t3 同步)
+  temperature: 5.0           # 4.0 -> 5.0   (类别多 → 软标签更软更有用)
+
+  batch_size: 16
+  epochs: 70                 # 50  -> 70    (Student 容量小, 7 类需要更多 epoch)
+  warmup_epochs: 3           # 新增
+  lr: 2.5e-4                 # 3e-4 -> 2.5e-4 (配合更长训练, 步长更稳)
+  min_lr: 1e-6
+  weight_decay: 0.08         # 0.05 -> 0.08 (Student 易过拟合 7 类)
+  ema_decay: 0.999           # 0.995 -> 0.999
+  grad_clip: 1.0             # 新增
+  patience: 15               # 新增: distill 阶段早停
+  use_mixup: true
+
+# =================================================================
+# 6. QAT (Phase 3)
+# =================================================================
+qat:
+  pretrained_path: "outputs_new/distilled_7cls/repvit_best_distilled_7cls_ema.pth"
+  output_dir: "outputs_new/qat_7cls"
+  output_pth: "repvit_qat_distill_7cls.pth"
+  output_onnx_parallel: "repvit_qat_distill_7cls.onnx"
+
+  batch_size: 8
+  epochs: 30                 # 20  -> 30  (7 类下 FakeQuant 收敛更慢)
+  warmup_epochs: 2           # 新增
+  lr: 3e-5                   # 4e-5 -> 3e-5 (QAT 阶段更保守, 防止破坏 FP32 基础)
+  min_lr: 1e-7
+  temperature: 5.0           # 4.0 -> 5.0  (与蒸馏阶段一致)
+  alpha_kd: 0.7              # 0.85 -> 0.7  (类别多, 给 hier GT 更多权重)
+  freeze_bn_ratio: 0.6       # 0.7  -> 0.6  (BN 更早冻结, 防 QAT 后期统计漂移)
+  use_mixup: false           # QAT 阶段不开 mixup, 避免假量化与软标签互相干扰
+
+# =================================================================
+# 7. 流式 ONNX 导出 (Phase 4)
+# =================================================================
+export:
+  qat_checkpoint: "outputs_new/qat_7cls/repvit_qat_distill_7cls.pth"
+  fp32_checkpoint: "outputs_new/distilled_7cls/repvit_best_distilled_7cls_ema.pth"
+  output_dir: "outputs_new/export_7cls"
+  streaming_onnx: "repvit_qat_distill_single_7cls.onnx"
+  fp32_streaming_onnx: "repvit_fp32_distill_single_7cls.onnx"
+  opset: 18
+
+# =================================================================
+# 8. YOLO 檢測器 (沿用 train/config.yaml)
+# =================================================================
+detector:
+  type: yolo
+  model: runs/detector/train22/weights/best.pt
+  conf: 0.35
+  iou: 0.5
+  imgsz: 416
+  device: cpu
+  tracker: bytetrack.yaml
+  classes: [0, 1]
