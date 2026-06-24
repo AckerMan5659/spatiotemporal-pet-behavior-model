@@ -126,12 +126,13 @@ class MergedVideoDataset(Dataset):
             if not (0 <= label < self.num_classes):
                 continue
 
-            images = [f for f in os.listdir(folder)
-                      if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+            images = sorted([f for f in os.listdir(folder)
+                             if f.lower().endswith((".jpg", ".jpeg", ".png"))])
             if not images:
                 continue
 
-            self.samples.append((folder, label))
+            frame_paths = [os.path.join(folder, img) for img in images]
+            self.samples.append((frame_paths, label))
             self.targets.append(label)
 
     # ------------------------------------------------------------------
@@ -150,18 +151,27 @@ class MergedVideoDataset(Dataset):
         cj_kwargs = dict(brightness=(bright, bright),
                          contrast=(contrast, contrast))
         if self.cj_sat > 0:
-            cj_kwargs["saturation"] = (max(0.0, 1.0 - self.cj_sat),
-                                        1.0 + self.cj_sat)
+            sat = random.uniform(max(0.0, 1.0 - self.cj_sat), 1.0 + self.cj_sat)
+            cj_kwargs["saturation"] = (sat, sat)
         if self.cj_hue > 0:
-            cj_kwargs["hue"] = (-self.cj_hue, self.cj_hue)
+            hue = random.uniform(-self.cj_hue, self.cj_hue)
+            cj_kwargs["hue"] = (hue, hue)
         ops.append(transforms.ColorJitter(**cj_kwargs))
         if do_flip:
             ops.append(transforms.RandomHorizontalFlip(p=1.0))
         ops.append(transforms.RandomAffine(
             degrees=(rot, rot),
-            translate=(abs(tx), abs(ty)) if (tx or ty) else None,
+            translate=None,
             scale=(scale, scale),
         ))
+        if tx != 0.0 or ty != 0.0:
+            tx_px = int(tx * self.img_size)
+            ty_px = int(ty * self.img_size)
+            ops.append(transforms.Lambda(
+                lambda img, dx=tx_px, dy=ty_px: transforms.functional.affine(
+                    img, angle=0, translate=[dx, dy], scale=1.0, shear=0
+                )
+            ))
         ops.append(transforms.ToTensor())
         ops.append(transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225]))
@@ -175,23 +185,21 @@ class MergedVideoDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def _load_frames(self, folder):
-        all_imgs = sorted([f for f in os.listdir(folder)
-                           if f.lower().endswith((".jpg", ".jpeg", ".png"))])
-        if not all_imgs:
+    def _load_frames(self, frame_paths):
+        if not frame_paths:
             return torch.zeros(self.seq_len, 3, self.img_size, self.img_size)
 
-        if len(all_imgs) >= self.seq_len:
-            idxs = np.linspace(0, len(all_imgs) - 1, self.seq_len).astype(int)
+        if len(frame_paths) >= self.seq_len:
+            idxs = np.linspace(0, len(frame_paths) - 1, self.seq_len).astype(int)
         else:
-            idxs = list(range(len(all_imgs)))
+            idxs = list(range(len(frame_paths)))
 
         tfm = self._build_train_transform() if self.is_train else self.transform_eval
 
         frames = []
         for i in idxs:
             try:
-                img = Image.open(os.path.join(folder, all_imgs[i])).convert("RGB")
+                img = Image.open(frame_paths[i]).convert("RGB")
                 frames.append(tfm(img))
             except Exception:
                 frames.append(torch.zeros(3, self.img_size, self.img_size))
@@ -201,11 +209,12 @@ class MergedVideoDataset(Dataset):
         return torch.stack(frames[: self.seq_len])
 
     def __getitem__(self, idx):
-        folder, label = self.samples[idx]
+        frame_paths, label = self.samples[idx]
         try:
-            pixel_values = self._load_frames(folder)
+            pixel_values = self._load_frames(frame_paths)
         except Exception as e:
-            print(f"⚠️ load {folder} failed: {e}")
+            src = frame_paths[0] if frame_paths else "?"
+            print(f"⚠️ load {src} failed: {e}")
             pixel_values = torch.zeros(self.seq_len, 3, self.img_size, self.img_size)
         return {
             "pixel_values": pixel_values,
@@ -236,12 +245,13 @@ class MergedVideoDataset(Dataset):
 
     def make_sampler(self, ingestion_ids=(1, 2), abnormal_ids=(3, 4, 5, 6),
                      other_id=0, abnormal_boost=1.2, ingestion_boost=1.0,
-                     other_boost=0.8):
+                     other_boost=0.8, limp_id=4, limp_boost=2.0):
         """
         WeightedRandomSampler — 让分层目标采样更均衡:
             - 异常类 (T1 正类) 略微上采样
             - 吃喝类 (T2 正类) 保持
             - other 略微下采样
+            - limp (class 4) 专项 2× 上采样, 补偿样本量最少
         """
         counts = self.class_counts().astype(np.float64)
         base = 1.0 / np.maximum(counts, 1.0)
@@ -254,6 +264,8 @@ class MergedVideoDataset(Dataset):
                 per_class[c] *= ingestion_boost
         if other_id < len(per_class):
             per_class[other_id] *= other_boost
+        if limp_id < len(per_class):
+            per_class[limp_id] *= limp_boost
 
         weights = np.asarray([per_class[t] for t in self.targets],
                              dtype=np.float64)

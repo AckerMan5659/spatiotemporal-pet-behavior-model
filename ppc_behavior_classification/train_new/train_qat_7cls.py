@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler
 from torch.amp import autocast
 from tqdm import tqdm
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, classification_report
 
 from torch.ao.quantization import (
     QConfig, FakeQuantize,
@@ -93,19 +93,20 @@ def _teacher_forward(teacher, frames):
 
 def validate(qat_model, loader, hcfg, num_classes, device):
     qat_model.eval()
-    preds, tgts, t1_p, t1_t, t2_p, t2_t = [], [], [], [], [], []
+    preds, tgts, t1_p, t1_t, t2_p, t2_t, t3_p, t3_t = [], [], [], [], [], [], [], []
     with torch.no_grad():
         for batch in tqdm(loader, desc="  Validating", leave=False):
             v = batch["pixel_values"].to(device, non_blocking=True)
             y = batch["labels"].to(device, non_blocking=True)
             logits = qat_model(v)
-            tp1, tp2, tp3, _ = hierarchical_predictions(
+            tp1, tp2, tp3, tp4, _ = hierarchical_predictions(
                 logits,
                 normal_ids=hcfg["normal_ids"],
                 abnormal_ids=hcfg["abnormal_ids"],
                 ingestion_ids=hcfg["ingestion_ids"],
+                sneeze_vomit_ids=hcfg["sneeze_vomit_ids"],
             )
-            preds.extend(tp3.cpu().numpy())
+            preds.extend(tp4.cpu().numpy())
             tgts.extend(y.cpu().numpy())
             t1_p.extend(tp1.cpu().numpy())
             t1_t.extend([1 if int(vv) in hcfg["abnormal_ids"] else 0
@@ -114,11 +115,18 @@ def validate(qat_model, loader, hcfg, num_classes, device):
                 if int(yt) in hcfg["normal_ids"]:
                     t2_p.append(int(yp))
                     t2_t.append(1 if int(yt) in hcfg["ingestion_ids"] else 0)
-    acc7 = sum(int(p == t) for p, t in zip(preds, tgts)) / max(1, len(preds))
+            sv_ids = hcfg["sneeze_vomit_ids"]
+            for yp3, yt3 in zip(tp3.cpu().numpy(), y.cpu().numpy()):
+                if int(yt3) in sv_ids:
+                    t3_p.append(int(yp3))
+                    t3_t.append(sv_ids.index(int(yt3)))
+    acc_t4 = sum(int(p == t) for p, t in zip(preds, tgts)) / max(1, len(preds))
     acc_t1 = sum(int(p == t) for p, t in zip(t1_p, t1_t)) / max(1, len(t1_p))
     acc_t2 = (sum(int(p == t) for p, t in zip(t2_p, t2_t)) / max(1, len(t2_p))
               if t2_p else 0.0)
-    return acc_t1, acc_t2, acc7, preds, tgts
+    acc_t3 = (sum(int(p == t) for p, t in zip(t3_p, t3_t)) / max(1, len(t3_p))
+              if t3_p else 0.0)
+    return acc_t1, acc_t2, acc_t3, acc_t4, preds, tgts
 
 
 # ----------------------------------------------------------------------
@@ -217,10 +225,12 @@ def train_qat(cfg_path):
         normal_ids=hcfg["normal_ids"],
         abnormal_ids=hcfg["abnormal_ids"],
         ingestion_ids=hcfg["ingestion_ids"],
+        sneeze_vomit_ids=hcfg["sneeze_vomit_ids"],
         other_id=hcfg["other_id"],
         w_t1=hcfg["w_t1_binary"],
         w_t2=hcfg["w_t2_ingestion"],
-        w_t3=hcfg["w_t3_fine"],
+        w_t3=hcfg["w_t3_sneeze_vomit"],
+        w_t4=hcfg["w_t4_fine"],
         label_smoothing=hcfg.get("label_smoothing", 0.1),
         class_weight=class_weight,
     ).to(device)
@@ -276,17 +286,25 @@ def train_qat(cfg_path):
             pbar.set_postfix(T1=f"{ema_t1:.3f}", T3=f"{ema_t3:.3f}",
                              KD=f"{ema_kd:.3f}",
                              lr=f"{scheduler.get_lr()[0]:.2e}")
-        acc_t1, acc_t2, acc7, preds, tgts = validate(qat_model, val_loader,
-                                                     hcfg, num_classes, device)
-        print(f"\n📊 QAT Val | T1={acc_t1:.2%} | T2={acc_t2:.2%} | T3={acc7:.2%}")
+        acc_t1, acc_t2, acc_t3, acc_t4, preds, tgts = validate(qat_model, val_loader,
+                                                                hcfg, num_classes, device)
+        print(f"\n📊 QAT Val | T1={acc_t1:.2%} | T2={acc_t2:.2%} "
+              f"| T3={acc_t3:.2%} | T4={acc_t4:.2%}")
         try:
             cm = confusion_matrix(tgts, preds, labels=list(range(num_classes)))
+            print("CM (rows=GT 0..6, cols=Pred 0..6):")
             for r in cm:
                 print(" ", r.tolist())
+            print(classification_report(
+                tgts, preds,
+                labels=list(range(num_classes)),
+                target_names=ds_cfg["class_names"],
+                zero_division=0,
+            ))
         except Exception:
             pass
 
-        score = 10.0 * acc_t1 + 3.0 * acc_t2 + 1.0 * acc7
+        score = 10.0 * acc_t1 + 3.0 * acc_t2 + 3.0 * acc_t3 + 1.0 * acc_t4
         if score > best_score:
             best_score = score
             torch.save(qat_model.state_dict(), save_pth)

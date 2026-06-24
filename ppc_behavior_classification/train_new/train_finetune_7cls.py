@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler
 from torch.amp import autocast
 from tqdm import tqdm
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, classification_report
 from timm.utils import ModelEmaV2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +69,7 @@ def evaluate(model_eval, loader, criterion, hcfg, device):
     preds, tgts = [], []
     t1_p, t1_t = [], []
     t2_p, t2_t = [], []  # only over normal subset
+    t3_p, t3_t = [], []  # only over sneeze/vomit subset
     val_loss = 0.0
     with torch.no_grad():
         for batch in loader:
@@ -78,13 +79,14 @@ def evaluate(model_eval, loader, criterion, hcfg, device):
                 logits = model_eval(x)
                 loss, _ = criterion(logits, y)
             val_loss += float(loss)
-            tp1, tp2, tp3, _ = hierarchical_predictions(
+            tp1, tp2, tp3, tp4, _ = hierarchical_predictions(
                 logits,
                 normal_ids=hcfg["normal_ids"],
                 abnormal_ids=hcfg["abnormal_ids"],
                 ingestion_ids=hcfg["ingestion_ids"],
+                sneeze_vomit_ids=hcfg["sneeze_vomit_ids"],
             )
-            preds.extend(tp3.cpu().numpy())
+            preds.extend(tp4.cpu().numpy())
             tgts.extend(y.cpu().numpy())
             t1_p.extend(tp1.cpu().numpy())
             t1_t.extend([1 if int(v) in hcfg["abnormal_ids"] else 0
@@ -94,19 +96,28 @@ def evaluate(model_eval, loader, criterion, hcfg, device):
                 if int(yt) in hcfg["normal_ids"]:
                     t2_p.append(int(yp))
                     t2_t.append(1 if int(yt) in hcfg["ingestion_ids"] else 0)
+            # T3 valid only when GT is sneeze or vomit
+            sv_ids = hcfg["sneeze_vomit_ids"]
+            for yp3, yt3 in zip(tp3.cpu().numpy(), y.cpu().numpy()):
+                if int(yt3) in sv_ids:
+                    t3_p.append(int(yp3))
+                    t3_t.append(sv_ids.index(int(yt3)))
 
     val_loss /= max(1, len(loader))
     n = max(1, len(preds))
-    acc7 = sum(int(p == t) for p, t in zip(preds, tgts)) / n
+    acc_t4 = sum(int(p == t) for p, t in zip(preds, tgts)) / n
     acc_t1 = (sum(int(p == t) for p, t in zip(t1_p, t1_t)) / max(1, len(t1_p)))
     acc_t2 = (sum(int(p == t) for p, t in zip(t2_p, t2_t)) / max(1, len(t2_p))
               if t2_p else 0.0)
+    acc_t3 = (sum(int(p == t) for p, t in zip(t3_p, t3_t)) / max(1, len(t3_p))
+              if t3_p else 0.0)
 
     return {
         "val_loss": val_loss,
         "acc_t1": acc_t1,
         "acc_t2": acc_t2,
-        "acc_t3": acc7,
+        "acc_t3": acc_t3,
+        "acc_t4": acc_t4,
         "preds": preds,
         "targets": tgts,
         "t1_pred": t1_p,
@@ -169,10 +180,12 @@ def train(cfg_path):
         normal_ids=hcfg["normal_ids"],
         abnormal_ids=hcfg["abnormal_ids"],
         ingestion_ids=hcfg["ingestion_ids"],
+        sneeze_vomit_ids=hcfg["sneeze_vomit_ids"],
         other_id=hcfg["other_id"],
         w_t1=hcfg["w_t1_binary"],
         w_t2=hcfg["w_t2_ingestion"],
-        w_t3=hcfg["w_t3_fine"],
+        w_t3=hcfg["w_t3_sneeze_vomit"],
+        w_t4=hcfg["w_t4_fine"],
         label_smoothing=hcfg.get("label_smoothing", 0.1),
         class_weight=class_weight,
         focal_gamma=hcfg.get("focal_gamma", 0.0),
@@ -231,7 +244,7 @@ def train(cfg_path):
                 print("🔥 Backbone unfrozen")
 
         model.train()
-        ema_l1, ema_l2, ema_l3 = 0.0, 0.0, 0.0
+        ema_l1, ema_l2, ema_l3, ema_l4 = 0.0, 0.0, 0.0, 0.0
         pbar = tqdm(train_loader, desc=f"Ep {epoch+1}/{t_cfg['epochs']}")
         optimizer.zero_grad(set_to_none=True)
 
@@ -248,9 +261,11 @@ def train(cfg_path):
                         normal_ids=hcfg["normal_ids"],
                         abnormal_ids=hcfg["abnormal_ids"],
                         ingestion_ids=hcfg["ingestion_ids"],
+                        sneeze_vomit_ids=hcfg["sneeze_vomit_ids"],
                         w_t1=hcfg["w_t1_binary"],
                         w_t2=hcfg["w_t2_ingestion"],
-                        w_t3=hcfg["w_t3_fine"],
+                        w_t3=hcfg["w_t3_sneeze_vomit"],
+                        w_t4=hcfg["w_t4_fine"],
                         class_weight=class_weight,
                         label_smoothing=hcfg.get("label_smoothing", 0.1),
                     )
@@ -273,15 +288,17 @@ def train(cfg_path):
             ema_l1 = 0.9 * ema_l1 + 0.1 * stats["l_t1"] if i else stats["l_t1"]
             ema_l2 = 0.9 * ema_l2 + 0.1 * stats["l_t2"] if i else stats["l_t2"]
             ema_l3 = 0.9 * ema_l3 + 0.1 * stats["l_t3"] if i else stats["l_t3"]
+            ema_l4 = 0.9 * ema_l4 + 0.1 * stats["l_t4"] if i else stats["l_t4"]
             pbar.set_postfix(T1=f"{ema_l1:.3f}", T2=f"{ema_l2:.3f}",
-                             T3=f"{ema_l3:.3f}",
+                             T3=f"{ema_l3:.3f}", T4=f"{ema_l4:.3f}",
                              lr=f"{scheduler.get_lr()[0]:.2e}")
 
         # ---------------- Evaluate (EMA model) -----------------------
         metrics = evaluate(model_ema.module, val_loader, criterion, hcfg, device)
         print(f"\n📊 Val | T1(bin)={metrics['acc_t1']:.2%} "
               f"| T2(ing)={metrics['acc_t2']:.2%} "
-              f"| T3(7-cls)={metrics['acc_t3']:.2%} "
+              f"| T3(sv)={metrics['acc_t3']:.2%} "
+              f"| T4(7cls)={metrics['acc_t4']:.2%} "
               f"| Loss={metrics['val_loss']:.4f}")
 
         try:
@@ -290,13 +307,20 @@ def train(cfg_path):
             print("CM (rows=GT 0..6, cols=Pred 0..6):")
             for r in cm:
                 print(" ", r.tolist())
+            print(classification_report(
+                metrics["targets"], metrics["preds"],
+                labels=list(range(num_classes)),
+                target_names=ds_cfg["class_names"],
+                zero_division=0,
+            ))
         except Exception:
             pass
 
-        # Priority score: T1 dominates, T2 next, T3 last
+        # Priority score: T1 dominates, T2=T3 next, T4 last
         score = (10.0 * metrics["acc_t1"]
                  + 3.0 * metrics["acc_t2"]
-                 + 1.0 * metrics["acc_t3"])
+                 + 3.0 * metrics["acc_t3"]
+                 + 1.0 * metrics["acc_t4"])
 
         is_best = score > best_score
         if is_best:

@@ -63,21 +63,24 @@ dataset:
     switch_prob: 0.5         # mixup 与 cutmix 各一半
 
 # =================================================================
-# 3. 分層目標 (Targets) - 优先级 T1 > T2 > T3
+# 3. 分層目標 (Targets) - 优先级 T1 > T2=T3 > T4
 # =================================================================
-# Target 1 二分类:  Normal {0,1,2}  vs  Abnormal {3,4,5,6}
-# Target 2 吃喝:    Ingestion {1,2} vs  Other {0}  (仅作用于 Normal 子集)
-# Target 3 细粒度: 7 类 cross-entropy
+# Target 1 二分类:         Normal {0,1,2}    vs  Abnormal {3,4,5,6}   (最高优先)
+# Target 2 吃喝:           Ingestion {1,2}  vs  Other {0}             (Normal 子集)
+# Target 3 打喷嚏/呕吐:   Sneeze {5}       vs  Vomit {6}             (与 T2 同优先级)
+# Target 4 细粒度:         7 类 cross-entropy                          (最低优先)
 hierarchical:
-  normal_ids:    [0, 1, 2]
-  abnormal_ids:  [3, 4, 5, 6]
-  ingestion_ids: [1, 2]
-  other_id:      0
+  normal_ids:       [0, 1, 2]
+  abnormal_ids:     [3, 4, 5, 6]
+  ingestion_ids:    [1, 2]
+  sneeze_vomit_ids: [5, 6]
+  other_id:         0
 
-  # Loss 权重 (T1 > T2 > T3) — 类别变多后, 适度降低 T1 以让 T3 有更多优化空间
-  w_t1_binary:     1.8       # 2.0  -> 1.8   (略降, 避免压制 T3)
-  w_t2_ingestion:  1.2
-  w_t3_fine:       1.2       # 1.0  -> 1.2   (略升, 7 类 CE 本身更难)
+  # Loss 权重 (T1 > T2=T3 > T4)
+  w_t1_binary:          1.8    # T1: Normal vs Abnormal (最高)
+  w_t2_ingestion:       1.2    # T2: Ingestion vs Other (Normal 子集)
+  w_t3_sneeze_vomit:    1.2    # T3: Sneeze vs Vomit   (sneeze/vomit 子集, 与 T2 同级)
+  w_t4_fine:            1.0    # T4: 7-way fine-grained CE (最低)
 
   # 7 类比 3/5 类需要更强的"软目标"以防过拟合 + 抵抗 limp 不平衡
   label_smoothing: 0.15      # 0.10 -> 0.15
